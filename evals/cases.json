@@ -1,0 +1,11 @@
+[
+  {"question": "How many days of annual leave do employees get?", "sources": ["leave-policy.md"], "contains": ["24 days"]},
+  {"question": "When is a medical certificate required?", "sources": ["leave-policy.md"], "contains": ["3 consecutive"]},
+  {"question": "What is the minimum password length?", "sources": ["security-handbook.md"], "contains": ["14 characters"]},
+  {"question": "How soon must I report a security incident?", "sources": ["security-handbook.md"], "contains": ["1 hour"]},
+  {"question": "What is the daily limit for meals on business travel?", "sources": ["expense-policy.md"], "contains": ["40 USD"]},
+  {"question": "How much annual leave carries forward and what is the minimum password length?", "sources": ["leave-policy.md", "security-handbook.md"], "contains": ["8 days", "14 characters"]},
+  {"question": "How many vacation days do I get?", "sources": ["leave-policy.md"], "contains": ["24 days"]},
+  {"question": "What is the company stock ticker symbol?", "abstain": true},
+  {"question": "Who won the football world cup?", "abstain": true}
+]
