@@ -1,0 +1,9 @@
+:root{color-scheme:light dark;--line:#8884;--accent:#c2561c}
+body{font:15px/1.5 system-ui,sans-serif;max-width:760px;margin:0 auto;padding:24px 16px}
+h1{margin:0}h1 span{color:var(--accent)}h2{font-size:16px;margin-top:28px}
+input,textarea,button,select{font:inherit;padding:8px;border:1px solid var(--line);border-radius:6px;box-sizing:border-box}
+input[type=text],input[type=password],textarea{width:100%;margin-bottom:8px}
+button{cursor:pointer;background:var(--accent);color:#fff;border:0}
+.card{border:1px solid var(--line);border-radius:8px;padding:12px;margin-top:12px;white-space:pre-wrap}
+li button{margin-left:8px;padding:2px 8px}small{opacity:.7}
+#message{color:var(--accent);min-height:1.5em}

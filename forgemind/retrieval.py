@@ -1,10 +1,18 @@
-"""Hybrid retrieval: BM25 + vector similarity, merged with reciprocal rank fusion."""
+"""Hybrid retrieval (BM25 + vectors, reciprocal rank fusion) over a cached per-tenant index.
+
+Permissions are applied before scoring, and BM25 statistics are computed over visible chunks
+only, so hidden documents do not influence results.
+"""
+import json
 import math
 import re
-from collections import Counter
+import threading
+from collections import Counter, OrderedDict
 from dataclasses import dataclass
 
 import numpy as np
+
+from .store import visible
 
 STOPWORDS = frozenset(
     "a an and are as at be by can do does for from how i if in is it its many much of on or our "
@@ -35,45 +43,104 @@ class Hit:
     similarity: float
 
 
-def bm25(query_terms, docs, k1=1.5, b=0.75):
-    n = len(docs)
-    avg = sum(map(len, docs)) / n or 1
-    df = Counter(t for d in docs for t in set(d))
-    scores = []
-    for doc in docs:
-        tf, score = Counter(doc), 0.0
-        for t in set(query_terms):
-            if tf[t]:
-                idf = math.log(1 + (n - df[t] + 0.5) / (df[t] + 0.5))
-                score += idf * tf[t] * (k1 + 1) / (tf[t] + k1 * (1 - b + b * len(doc) / avg))
-        scores.append(score)
-    return scores
+class Index:
+    def __init__(self, rows):
+        self.meta = [(r["id"], r["doc_id"], r["title"], r["position"], r["text"]) for r in rows]
+        self.matrix = (np.frombuffer(b"".join(r["vector"] for r in rows), dtype=np.float32)
+                       .reshape(len(rows), -1) if rows else None)
+        # Chunks sharing an access list are checked once per query.
+        keys = {}
+        self.acl = np.array([keys.setdefault(r["groups"], len(keys)) for r in rows], dtype=np.int32)
+        self.acl_groups = [json.loads(k) for k in keys]
+        self.lengths = np.zeros(len(rows), dtype=np.float32)
+        postings = {}
+        for i, r in enumerate(rows):
+            tokens = tokenize(r["title"] + " " + r["text"])
+            self.lengths[i] = len(tokens)
+            for term, count in Counter(tokens).items():
+                ids, counts = postings.setdefault(term, ([], []))
+                ids.append(i)
+                counts.append(count)
+        self.postings = {t: (np.array(i, np.int32), np.array(c, np.float32))
+                         for t, (i, c) in postings.items()}
+
+    def mask(self, principal):
+        allowed = np.array([visible(principal, g) for g in self.acl_groups], dtype=bool)
+        return allowed[self.acl]
+
+    def score(self, terms, mask, k1=1.5, b=0.75):
+        scores, matched = np.zeros(len(self.meta)), np.zeros(len(self.meta))
+        n = int(mask.sum())
+        avg = float(self.lengths[mask].mean()) or 1.0
+        for term in terms:
+            if term not in self.postings:
+                continue
+            ids, tf = self.postings[term]
+            keep = mask[ids]
+            ids, tf = ids[keep], tf[keep]
+            if not len(ids):
+                continue
+            idf = math.log(1 + (n - len(ids) + 0.5) / (len(ids) + 0.5))
+            scores[ids] += idf * tf * (k1 + 1) / (tf + k1 * (1 - b + b * self.lengths[ids] / avg))
+            matched[ids] += 1
+        return scores, matched / len(terms)
 
 
 class Retriever:
-    def __init__(self, store, embedder):
+    def __init__(self, store, embedder, max_tenants=16, max_chunks=100000):
         self.store, self.embedder = store, embedder
+        self.max_tenants, self.max_chunks = max_tenants, max_chunks
+        self._cache = OrderedDict()
+        self._lock = threading.Lock()  # guards the two dicts only
+        self._building = {}
+
+    def index(self, tenant) -> Index:
+        revision = self.store.revision(tenant)
+        with self._lock:
+            cached = self._cache.get(tenant)
+            if cached and cached[0] >= revision:
+                self._cache.move_to_end(tenant)
+                return cached[1]
+            build_lock = self._building.setdefault(tenant, threading.Lock())
+        with build_lock:  # one build per tenant; other tenants are not blocked
+            with self._lock:
+                cached = self._cache.get(tenant)
+            if cached and cached[0] >= revision:
+                return cached[1]
+            revision, rows = self.store.snapshot(tenant, self.embedder.name)
+            index = Index(rows)
+            with self._lock:
+                self._cache[tenant] = (revision, index)
+                self._cache.move_to_end(tenant)
+                while len(self._cache) > 1 and (
+                        len(self._cache) > self.max_tenants
+                        or sum(len(i.meta) for _, i in self._cache.values()) > self.max_chunks):
+                    self._cache.popitem(last=False)
+        return index
 
     def search(self, principal, query, top_k=5):
-        rows = self.store.visible_chunks(principal, self.embedder.name)
         terms = set(tokenize(query))
-        if not rows or not terms:
+        index = self.index(principal.tenant)
+        if not index.meta or not terms:
             return []
-        # Title words count as part of each chunk.
-        docs = [tokenize(r["title"] + " " + r["text"]) for r in rows]
-        lexical = bm25(list(terms), docs)
-        matrix = np.stack([np.frombuffer(r["vector"], dtype=np.float32) for r in rows])
-        similarity = matrix @ self.embedder.embed([query])[0]
+        mask = index.mask(principal)
+        if not mask.any():
+            return []
+        lexical, coverage = index.score(terms, mask)
+        similarity = index.matrix @ self.embedder.embed([query])[0]
+        similarity = np.where(mask, similarity, 0.0)
 
-        fused = [0.0] * len(rows)
+        fused = np.zeros(len(index.meta))
         for scores in (lexical, similarity):
-            order = sorted(range(len(rows)), key=lambda i: -scores[i])
-            for rank, i in enumerate(order):
-                if scores[i] > 0:
-                    fused[i] += 1 / (60 + rank + 1)
+            positive = np.flatnonzero(scores > 0)
+            order = positive[np.argsort(-scores[positive], kind="stable")][:200]
+            fused[order] += 1.0 / (61 + np.arange(len(order)))
 
-        best = sorted(range(len(rows)), key=lambda i: (-fused[i], -lexical[i]))[:top_k]
-        return [Hit(rows[i]["id"], rows[i]["doc_id"], rows[i]["title"], rows[i]["position"],
-                    rows[i]["text"], fused[i], len(terms & set(docs[i])) / len(terms),
-                    float(similarity[i]))
-                for i in best if fused[i] > 0]
+        candidates = np.flatnonzero(fused > 0)
+        best = candidates[np.lexsort((candidates, -lexical[candidates], -fused[candidates]))][:top_k]
+        hits = []
+        for i in best:
+            chunk_id, doc_id, title, position, text = index.meta[i]
+            hits.append(Hit(chunk_id, doc_id, title, position, text, float(fused[i]),
+                            float(coverage[i]), float(similarity[i])))
+        return hits

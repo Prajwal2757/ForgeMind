@@ -1,8 +1,10 @@
-"""Application service shared by the API, CLI and evals."""
+"""Wires the components together; shared by the API, CLI and evals."""
 from .agent import Agent
+from .auth import Users
 from .config import Settings
+from .db import Database
 from .embeddings import make_embedder
-from .ingest import chunk_text, extract_text
+from .jobs import Jobs
 from .llm import make_llm
 from .retrieval import Retriever
 from .store import Store
@@ -11,25 +13,17 @@ from .store import Store
 class ForgeMind:
     def __init__(self, settings=None):
         self.settings = settings or Settings()
-        self.store = Store(self.settings.db_path)
+        self.db = Database(self.settings.db_path)
+        self.users = Users(self.db)
+        self.store = Store(self.db, self.settings.max_chunks_per_tenant)
         self.embedder = make_embedder(self.settings)
-        self.agent = Agent(Retriever(self.store, self.embedder), make_llm(self.settings))
-
-    def ingest(self, principal, filename, data, groups=()):
-        if not principal.can_write():
-            raise PermissionError("viewers cannot add documents")
-        if not principal.is_admin() and not set(groups) <= set(principal.groups):
-            raise PermissionError("you can only share with groups you belong to")
-        chunks = chunk_text(extract_text(filename, data))
-        vectors = self.embedder.embed([f"{filename}\n{c}" for c in chunks])
-        doc_id = self.store.add_document(
-            principal, filename, groups, chunks, vectors, self.embedder.name)
-        self.store.log(principal, "ingest", {"doc_id": doc_id, "title": filename,
-                                             "chunks": len(chunks), "groups": list(groups)})
-        return {"id": doc_id, "title": filename, "chunks": len(chunks)}
+        self.jobs = Jobs(self.db, self.store, self.users, self.embedder, self.settings)
+        self.agent = Agent(Retriever(self.store, self.embedder,
+                                     max_chunks=self.settings.max_cached_chunks), make_llm(self.settings))
 
     def ask(self, principal, question):
         result = self.agent.ask(principal, question)
-        self.store.log(principal, "ask", {"question": question, "grounded": result["grounded"],
-                                          "documents": [s["doc_id"] for s in result["sources"]]})
+        self.store.log(principal.tenant, principal.user, "ask",
+                       {"question": question, "grounded": result["grounded"],
+                        "documents": [s["doc_id"] for s in result["sources"]]})
         return result

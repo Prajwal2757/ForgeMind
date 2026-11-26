@@ -1,9 +1,8 @@
 """Embedding providers. All return L2-normalised float32 rows."""
-import json
-import urllib.request
-
 import numpy as np
 from sklearn.feature_extraction.text import HashingVectorizer
+
+from .net import ProviderError, post_json
 
 
 class HashingEmbedder:
@@ -28,12 +27,16 @@ class OpenAIEmbedder:
     def embed(self, texts):
         rows = []
         for i in range(0, len(texts), 64):
-            req = urllib.request.Request(
-                self.url, json.dumps({"model": self.model, "input": texts[i:i + 64]}).encode(),
-                {"Authorization": f"Bearer {self.key}", "Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                data = sorted(json.load(resp)["data"], key=lambda d: d["index"])
-            rows += [d["embedding"] for d in data]
+            response = post_json(self.url, {"Authorization": f"Bearer {self.key}"},
+                                 {"model": self.model, "input": texts[i:i + 64]})
+            try:
+                data = sorted(response["data"], key=lambda d: d["index"])
+                batch = [d["embedding"] for d in data]
+            except (KeyError, TypeError):
+                raise ProviderError("unexpected response shape")
+            if len(batch) != len(texts[i:i + 64]):
+                raise ProviderError("wrong number of embeddings")
+            rows += batch
         m = np.array(rows, dtype=np.float32)
         return m / np.clip(np.linalg.norm(m, axis=1, keepdims=True), 1e-12, None)
 

@@ -1,8 +1,8 @@
 """LLM providers. `extractive` needs no key: it quotes the best-matching sentences."""
 import json
 import re
-import urllib.request
 
+from .net import ProviderError, post_json
 from .retrieval import tokenize
 
 NO_ANSWER = "I could not find this in the documents you have access to."
@@ -65,24 +65,23 @@ class _RemoteLLM:
     def answer(self, question, hits, queries):
         return self.complete(ANSWER_SYSTEM, f"{format_sources(hits)}\n\nQuestion: {question}")
 
-    @staticmethod
-    def _post(url, headers, body):
-        req = urllib.request.Request(url, json.dumps(body).encode(),
-                                     {"Content-Type": "application/json", **headers})
-        with urllib.request.urlopen(req, timeout=90) as resp:
-            return json.load(resp)
-
 
 class AnthropicLLM(_RemoteLLM):
-    def __init__(self, api_key, model):
+    def __init__(self, api_key, model, base_url="https://api.anthropic.com"):
+        self.url = base_url.rstrip("/") + "/v1/messages"
         self.key, self.model, self.name = api_key, model, f"anthropic:{model}"
 
     def complete(self, system, user):
-        data = self._post("https://api.anthropic.com/v1/messages",
-                          {"x-api-key": self.key, "anthropic-version": "2023-06-01"},
-                          {"model": self.model, "max_tokens": 1024, "system": system,
-                           "messages": [{"role": "user", "content": user}]})
-        return "".join(b.get("text", "") for b in data["content"]).strip()
+        data = post_json(self.url, {"x-api-key": self.key, "anthropic-version": "2023-06-01"},
+                         {"model": self.model, "max_tokens": 4096, "system": system,
+                          "messages": [{"role": "user", "content": user}]})
+        try:
+            text = "".join(b["text"] for b in data["content"] if b["type"] == "text").strip()
+        except (KeyError, TypeError):
+            raise ProviderError("unexpected response shape")
+        if not text:
+            raise ProviderError("empty response")
+        return text
 
 
 class OpenAILLM(_RemoteLLM):
@@ -91,11 +90,14 @@ class OpenAILLM(_RemoteLLM):
         self.key, self.model, self.name = api_key, model, f"openai:{model}"
 
     def complete(self, system, user):
-        data = self._post(self.url, {"Authorization": f"Bearer {self.key}"},
-                          {"model": self.model, "messages": [
-                              {"role": "system", "content": system},
-                              {"role": "user", "content": user}]})
-        return data["choices"][0]["message"]["content"].strip()
+        data = post_json(self.url, {"Authorization": f"Bearer {self.key}"},
+                         {"model": self.model, "messages": [
+                             {"role": "system", "content": system},
+                             {"role": "user", "content": user}]})
+        try:
+            return data["choices"][0]["message"]["content"].strip()
+        except (KeyError, IndexError, TypeError, AttributeError):
+            raise ProviderError("unexpected response shape")
 
 
 def make_llm(settings):
@@ -105,7 +107,8 @@ def make_llm(settings):
     if p == "anthropic":
         if not settings.anthropic_api_key:
             raise ValueError("ANTHROPIC_API_KEY is required")
-        return AnthropicLLM(settings.anthropic_api_key, settings.llm_model or "claude-sonnet-5-5")
+        return AnthropicLLM(settings.anthropic_api_key, settings.llm_model or "claude-sonnet-5-5",
+                            settings.anthropic_base_url)
     if p == "openai":
         if not settings.llm_model:
             raise ValueError("FORGEMIND_LLM_MODEL is required for the openai provider")

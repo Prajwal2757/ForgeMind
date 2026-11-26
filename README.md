@@ -1,62 +1,59 @@
 # ForgeMind: Enterprise Agentic RAG Platform
 
 Ask questions over company documents and get answers with citations, limited to what the
-asker is allowed to see.
+person asking is allowed to see. Built to run on a single server.
 
 ## Features
-- Ingests PDF, DOCX, Markdown and text
-- Hybrid retrieval: BM25 + vector similarity, merged by reciprocal rank fusion
-- Agent loop: plan, retrieve, grade, reformulate, answer, verify citations, or abstain
-- Multi-tenant, with roles (viewer / editor / admin) and per-document groups
-- Permission filtering before scoring, so hidden text never reaches the model
-- Audit log, upload size limit, per-user rate limit
-- Web UI, HTTP API, CLI, Docker, CI, regression evals
+- PDF, DOCX, Markdown and text, processed by a persistent background queue
+- Hybrid retrieval (BM25 + vectors, reciprocal rank fusion)
+- Agent loop: plan, retrieve, grade, reformulate, answer, check citations, or abstain
+- Organisations (tenants), viewer / editor / admin roles, per-document groups
+- User accounts with hashed passwords, immediate session revocation, login throttling
+- Audit log, rate limits, quotas, JSON logs, Prometheus metrics, readiness checks
+- HTTPS deployment with Docker Compose and Caddy, backups, schema migrations
 
-## Architecture
-```
-upload -> extract -> chunk -> embed -> SQLite
-question -> auth -> plan -> [permission filter -> BM25 + vectors] -> grade -> (reformulate)
-                                      -> answer -> citation check -> response + audit
-```
-
-## Quick start
+## Try it locally (Python 3.13)
 ```bash
-python -m venv .venv && source .venv/bin/activate
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 export FORGEMIND_SECRET=$(python -c "import secrets;print(secrets.token_hex(32))")
+python -m forgemind user-add --tenant acme --user admin --role admin   # asks for a password
 python -m forgemind ingest --tenant acme examples/docs/*.md
-python -m forgemind token --tenant acme --user you --role admin
-python -m forgemind serve      # open http://127.0.0.1:8000 and paste the token
+python -m forgemind serve        # http://127.0.0.1:8000, organisation "acme"
 ```
-Docker: `cp .env.example .env`, set `FORGEMIND_SECRET`, then `docker compose up --build`.
+Deploying for real: see [docs/OPERATIONS.md](docs/OPERATIONS.md).
+Security design: see [docs/SECURITY.md](docs/SECURITY.md).
 
-## Using a real model
-The default `extractive` mode quotes matching sentences. It needs no API key and is meant for
-demos and tests, not for reasoning over documents. Observed limits: it can refuse a reworded
-question ("daily meal limit when travelling"), and it can answer a near-miss with the wrong fact
-("parental leave" returns the annual leave line). Use a real model for anything that matters. For generated answers:
-```bash
-export FORGEMIND_LLM=anthropic ANTHROPIC_API_KEY=...
-```
-or `FORGEMIND_LLM=openai` with `OPENAI_API_KEY` and `FORGEMIND_LLM_MODEL` (any compatible
-endpoint via `OPENAI_BASE_URL`). In these modes the question and retrieved text are sent to
-that provider.
+## Answer quality
+The default `extractive` mode needs no API key and only quotes matching sentences. It can refuse
+a reworded question ("daily meal limit when travelling") and can answer a near miss with the
+wrong fact ("parental leave" returns the annual leave line). **Do not rely on it for real use.**
 
-The default embeddings are character n-gram hashes, which are not semantic. Set
-`FORGEMIND_EMBEDDINGS=openai` for semantic search. Documents must be re-ingested after
-changing embedding provider.
+Set `FORGEMIND_LLM=anthropic` with `ANTHROPIC_API_KEY`, or `FORGEMIND_LLM=openai` with
+`OPENAI_API_KEY` and `FORGEMIND_LLM_MODEL`. The default embeddings are character hashes, not
+semantic; set `FORGEMIND_EMBEDDINGS=openai` for semantic search, then run
+`python -m forgemind reindex`. With any remote provider, document text and questions are sent
+to that provider.
+
+The bundled eval is 9 questions written alongside the code, with a small synonym list in
+`agent.py`. It catches regressions and says nothing about accuracy on your documents.
 
 ## API
-All `/api` routes need `Authorization: Bearer <token>`.
+All `/api` routes except login need `Authorization: Bearer <token>`.
 
-| Method | Path | Notes |
+| Method and path | Who | Notes |
 |---|---|---|
-| POST | `/api/documents?filename=x.pdf&groups=hr` | raw file body; editor or admin |
-| GET | `/api/documents` | only documents you can see |
-| DELETE | `/api/documents/{id}` | owner or admin |
-| POST | `/api/ask` | `{"question": "..."}` |
-| GET | `/api/audit` | admin, own tenant |
-| GET | `/health` | no auth |
+| POST `/api/login` | anyone | `{"tenant","user","password"}` |
+| POST `/api/logout`, `/api/password`; GET `/api/me` | signed in | logout ends all your sessions |
+| POST `/api/documents?filename=x.pdf&groups=hr` | editor, admin | raw body; returns a job id |
+| GET `/api/jobs/{id}` | uploader, admin | `queued`, `running`, `done`, `failed` |
+| GET `/api/documents?limit=&offset=` | signed in | only what you can see |
+| DELETE `/api/documents/{id}` | owner, admin | |
+| POST `/api/ask` | signed in | `{"question"}` |
+| GET, POST `/api/users`; PATCH `/api/users/{name}` | admin | own tenant only |
+| GET `/api/audit?limit=&before=&action=` | admin | own tenant only |
+| GET `/health`, `/ready` | anyone | |
+| GET `/metrics` | metrics token | off unless configured |
 
 ## Tests
 ```bash
@@ -65,16 +62,11 @@ python -m pytest -q
 python -m forgemind eval
 ```
 
-The bundled eval is a 9-question regression check written alongside the code, including a small
-synonym list in `agent.py`. It is not a measure of accuracy on your documents.
-
-## Not production-ready yet
-- Tokens are issued by CLI; there is no SSO/OIDC and no token revocation
-- Retrieval scans all of a tenant's chunks in memory; use a vector database beyond small corpora
-- Ingestion runs inside the request; no job queue, OCR or connectors
-- Rate limiting is per process
-- The Anthropic and OpenAI-compatible providers have not been run against the live services
-- PDF/DOCX parsing is not sandboxed; only the compressed upload size is limited
-- Serve behind a TLS-terminating proxy
-- The citation check confirms citations point to retrieved sources, not that each claim is true
-- Group names and permissions come from the token; there is no user directory
+## Known limits
+- One server, SQLite. No high availability or horizontal scaling.
+- No single sign-on (OIDC/SAML) and no multi-factor authentication.
+- No OCR for scanned documents; no connectors to Drive, SharePoint and similar.
+- A tenant's search index is rebuilt in memory after each upload or delete.
+- The citation check confirms citations point to retrieved text, not that each claim is true.
+- The Anthropic and OpenAI-compatible providers are tested against a local stand-in only,
+  never the live services.
