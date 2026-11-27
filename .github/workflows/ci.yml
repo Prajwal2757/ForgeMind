@@ -47,6 +47,18 @@ jobs:
       - name: Logs
         if: failure()
         run: docker compose logs
+  one-command-start:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python scripts/start_check.py
   dependency-audit:
     runs-on: ubuntu-latest
     steps:

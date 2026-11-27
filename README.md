@@ -12,15 +12,22 @@ person asking is allowed to see. Built to run on a single server.
 - Audit log, rate limits, quotas, JSON logs, Prometheus metrics, readiness checks
 - HTTPS deployment with Docker Compose and Caddy, backups, schema migrations
 
-## Try it locally (Python 3.13)
-```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-export FORGEMIND_SECRET=$(python -c "import secrets;print(secrets.token_hex(32))")
-python -m forgemind user-add --tenant acme --user admin --role admin   # asks for a password
-python -m forgemind ingest --tenant acme examples/docs/*.md
-python -m forgemind serve        # http://127.0.0.1:8000, organisation "acme"
-```
+## Try it on your computer
+Install [Python 3.13 or newer](https://www.python.org/downloads/), then:
+
+| System | Do this |
+|---|---|
+| Windows | double-click `start.bat` |
+| macOS, Linux | run `python3 start.py` in this folder |
+
+The first run installs dependencies, asks you to choose a password and adds three sample
+documents. Your browser then opens at http://127.0.0.1:8000. Sign in with organisation `acme`,
+user `admin`. Keep the window open while you use it.
+
+Try: "How many days of annual leave do employees get?" and then upload a document of your own.
+
+To use a real model, copy `.env.example` to `.env`, fill in the provider and key, and start again.
+
 Deploying for real: see [docs/OPERATIONS.md](docs/OPERATIONS.md).
 Security design: see [docs/SECURITY.md](docs/SECURITY.md).
 
@@ -65,6 +72,7 @@ python -m forgemind eval
 ## Known limits
 - One server, SQLite. No high availability or horizontal scaling.
 - No single sign-on (OIDC/SAML) and no multi-factor authentication.
+- Users are managed by command line or API; there is no admin screen.
 - No OCR for scanned documents; no connectors to Drive, SharePoint and similar.
 - A tenant's search index is rebuilt in memory after each upload or delete.
 - The citation check confirms citations point to retrieved text, not that each claim is true.
