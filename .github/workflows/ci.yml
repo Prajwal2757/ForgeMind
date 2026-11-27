@@ -1,5 +1,8 @@
 name: CI
-on: [push, pull_request]
+on:
+  push:
+    branches: [main]
+  pull_request:
 permissions:
   contents: read
 jobs:
@@ -13,3 +16,54 @@ jobs:
       - run: pip install -r requirements.txt -r requirements-dev.txt
       - run: python -m pytest -q
       - run: python -m forgemind eval
+  deployment:
+    runs-on: ubuntu-latest
+    env:
+      FORGEMIND_PASSWORD: ci-only-password-123
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: |
+          cp .env.example .env
+          sed -i "s/^FORGEMIND_SECRET=.*/FORGEMIND_SECRET=$(openssl rand -hex 32)/" .env
+      - name: Start the full stack
+        run: docker compose up -d --build --wait
+      - name: Create a user
+        run: docker compose exec -T -e FORGEMIND_PASSWORD forgemind python -m forgemind user-add --tenant ci --user admin --role admin
+      - name: Smoke test over HTTPS
+        run: |
+          for i in $(seq 30); do docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt ./caddy-root.crt && break; sleep 1; done
+          SSL_CERT_FILE=$PWD/caddy-root.crt python3 scripts/smoke.py https://localhost ci admin
+      - name: Back up and restore, following docs/OPERATIONS.md
+        run: |
+          docker compose exec -T forgemind python -m forgemind backup /data/ci-backup.db
+          docker compose cp forgemind:/data/ci-backup.db ./backup.db
+          docker compose stop forgemind
+          docker compose run --rm --no-deps forgemind sh -c "rm -f /data/forgemind.db-wal /data/forgemind.db-shm"
+          docker compose cp ./backup.db forgemind:/data/forgemind.db
+          docker compose run --rm --no-deps --user root --cap-add CHOWN forgemind chown app /data/forgemind.db
+          docker compose start forgemind
+          SSL_CERT_FILE=$PWD/caddy-root.crt python3 scripts/smoke.py https://localhost ci admin
+      - name: Logs
+        if: failure()
+        run: docker compose logs
+  one-command-start:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python scripts/start_check.py
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install pip-audit && pip-audit -r requirements.txt

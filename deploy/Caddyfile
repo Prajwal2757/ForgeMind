@@ -1,0 +1,18 @@
+{
+	servers {
+		timeouts {
+			read_header 10s
+			read_body 120s
+			idle 2m
+		}
+	}
+}
+
+{$FORGEMIND_DOMAIN} {
+	encode gzip
+	header Strict-Transport-Security "max-age=31536000"
+	request_body {
+		max_size 12MB
+	}
+	reverse_proxy forgemind:8000
+}

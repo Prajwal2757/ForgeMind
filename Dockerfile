@@ -1,10 +1,13 @@
 FROM python:3.13-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 FORGEMIND_DB=/data/forgemind.db
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY forgemind forgemind
-RUN useradd -m app && mkdir /data && chown app /data
+RUN useradd --system --uid 1000 app && mkdir /data && chown app /data
 USER app
-ENV FORGEMIND_DB=/data/forgemind.db
+VOLUME /data
 EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s CMD \
+  python -c "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/ready',timeout=4)"
 CMD ["python", "-m", "forgemind", "serve", "--host", "0.0.0.0"]

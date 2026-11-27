@@ -1,29 +1,29 @@
 """Turn uploaded files into overlapping text chunks."""
-import io
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 SUPPORTED = (".txt", ".md", ".pdf", ".docx")
+WORKER = Path(__file__).with_name("parse_worker.py")
 
 
-def extract_text(filename: str, data: bytes) -> str:
+def extract_text(filename: str, data: bytes, timeout: int = 60) -> str:
     ext = Path(filename).suffix.lower()
     if ext not in SUPPORTED:
         raise ValueError(f"unsupported file type '{ext}'; use one of {', '.join(SUPPORTED)}")
+    # The child gets no secrets from our environment.
+    env = {k: os.environ[k] for k in ("PATH", "HOME", "SYSTEMROOT") if k in os.environ}
     try:
-        if ext == ".pdf":
-            from pypdf import PdfReader
-            text = "\n\n".join(p.extract_text() or "" for p in PdfReader(io.BytesIO(data)).pages)
-        elif ext == ".docx":
-            from docx import Document
-            doc = Document(io.BytesIO(data))
-            parts = [p.text for p in doc.paragraphs]
-            parts += [" | ".join(c.text for c in r.cells) for t in doc.tables for r in t.rows]
-            text = "\n\n".join(parts)
-        else:
-            text = data.decode("utf-8")
-    except Exception as exc:
-        raise ValueError(f"could not read {filename}: {type(exc).__name__}") from exc
+        done = subprocess.run([sys.executable, "-E", "-P", str(WORKER), ext], input=data,
+                              capture_output=True, timeout=timeout, env=env)
+    except subprocess.TimeoutExpired:
+        raise ValueError(f"could not read {filename}: parsing took too long")
+    if done.returncode != 0:
+        reason = done.stderr.decode("utf-8", "replace").strip()[-200:] or "parser crashed"
+        raise ValueError(f"could not read {filename}: {reason}")
+    text = done.stdout.decode("utf-8")
     if not text.strip():
         raise ValueError("no extractable text (scanned PDFs need OCR first)")
     return text

@@ -1,8 +1,31 @@
 services:
   forgemind:
     build: .
-    ports: ["127.0.0.1:8000:8000"]
+    restart: unless-stopped
     env_file: .env
+    environment:
+      FORGEMIND_ALLOWED_HOSTS: "${FORGEMIND_DOMAIN:-localhost},127.0.0.1"
+      # Safe only because this port is not published: all traffic arrives through Caddy.
+      FORWARDED_ALLOW_IPS: "*"
     volumes: ["data:/data"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 3g
+    pids_limit: 200
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      forgemind:
+        condition: service_healthy
+    environment:
+      FORGEMIND_DOMAIN: "${FORGEMIND_DOMAIN:-localhost}"
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
 volumes:
   data:
+  caddy_data:
